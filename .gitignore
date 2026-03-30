@@ -1,0 +1,43 @@
+# 配置文件（包含敏感信息）
+config/config.yaml
+
+# 环境变量文件
+.env
+.env.local
+
+# 数据存储
+data/
+*.json
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志
+*.log
+
+# 内网穿透工具
+natapp
+natapp_linux_*
+*.zip
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# claude
+.claude
