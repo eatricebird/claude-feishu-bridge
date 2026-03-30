@@ -62,7 +62,7 @@
 
 ---
 
-## 二、快速开始
+## 二、快速部署
 
 ### 2.1. 前置要求
 
@@ -105,16 +105,26 @@ vi config/config.yaml
 
 详见下方"配置飞书"章节。
 
-#### 2.2.5. 启动服务
+#### 2.2.5. 配置内网穿透
+详见下方"内网穿透配置"章节
+
+详见下方"配置飞书"章节。
+
+#### 2.2.6. 启动服务
 
 ```bash
 # 终端 1：启动 Webhook 服务器
 cd ~/claude-feishu-bridge
 python3 src/server/webhook_server.py
 
-# 终端 2：启动内网穿透,YOUR_TOKEN的获取方法参考"内网穿透配置"章节
+# 终端 2：启动内网穿透,YOUR_TOKEN可以在配置内网穿透时获取
 ./natapp -authtoken=YOUR_TOKEN -log=stdout
 ```
+
+#### 2.2.7. 部署 Hook
+参考"部署 Claude Code Hook"章节
+
+至此部署完成。
 
 ---
 
