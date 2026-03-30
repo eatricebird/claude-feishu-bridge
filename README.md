@@ -50,15 +50,15 @@
 | 存储层 | 持久化权限请求状态 | JSON 文件 |
 | 内网穿透 | 暴露本地服务到公网 | Natapp |
 
-本项目仅仅包含`Hook脚本`,`Webhook 服务器`,`存储层`，飞书客户端，内网穿透需要客户自行搭建和配置（可以参考本文操作）
+本项目仅仅包含`Hook脚本`,`Webhook 服务器`,`存储层`. 飞书客户端，内网穿透需要客户自行搭建和配置（可以参考本文操作）
 
 #### 1.2.1. 存储层的作用：
   - 存储每个权限请求的状态（待批准/已批准/已拒绝）
   - Hook 脚本写入请求 → Webhook 服务器更新状态 → Hook 脚本轮询检测变化
 
 #### 1.2.2. 为什么要内网穿透？
-如果本系统（claude code + HOOK脚本 +  Webhook 服务器）部署在内网（比如家中，公司内网等），那么必须做内网穿透才能和运行在外网环境的手机通信
-如果系统本身就有公网IP就不必内网穿透
+如果本系统（claude code + HOOK脚本 +  Webhook 服务器）部署在内网（比如家中，公司内网等），那么必须做内网穿透才能和运行在外网环境的手机通信。  
+如果系统本身就有公网IP就不必内网穿透。
 
 ---
 
@@ -72,10 +72,10 @@
 
 ### 2.2. 安装步骤
 
-#### 2.2.1. 克隆/创建项目
+#### 2.2.1. 克隆项目
 
 ```bash
-cd /home/alan/furbo/feishu_notify
+git clone https://github.com/eatricebird/claude-feishu-bridge.git ~/
 ```
 
 #### 2.2.2. 安装依赖
@@ -109,7 +109,7 @@ vi config/config.yaml
 
 ```bash
 # 终端 1：启动 Webhook 服务器
-cd ~/feishu_notify
+cd ~/claude-feishu-bridge
 python3 src/server/webhook_server.py
 
 # 终端 2：启动内网穿透,YOUR_TOKEN的获取方法参考"内网穿透配置"章节
@@ -151,7 +151,7 @@ python3 src/server/webhook_server.py
 3. 在 **"回调配置"** 中：
    - 订阅方式：`将回调发送至 开发者服务器`
    - 请求地址：`http://${your public url}/webhook/feishu`
-  - 订阅事件：
+   - 订阅事件：
     - `card.action.trigger`
 4. 在 **"事件配置"** 中：
    - 订阅方式：`将事件发送至 开发者服务器`
@@ -208,9 +208,8 @@ feishu:
 
 #### 4.1.2. 下载 Natapp
 
-```bash
-wget https://cdn.natapp.cn/natapp_linux_amd64_3_2_3.zip
-unzip natapp_linux_amd64_3_2_3.zip
+```
+https://natapp.cn/download
 ```
 
 #### 4.1.3. 配置本地端口
@@ -254,7 +253,7 @@ Claude Code 按以下顺序读取配置：
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/feishu_notify/src/hooks/permission_request.py",
+            "command": "python3 ~/claude-feishu-bridge/src/hooks/permission_request.py",
             "timeout": 360
           }
         ]
@@ -278,7 +277,7 @@ cat > /path/to/project/.claude/settings.json <<EOF
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/feishu_notify/src/hooks/permission_request.py",
+            "command": "python3 ~/claude-feishu-bridge/src/hooks/permission_request.py",
             "timeout": 360
           }
         ]
@@ -308,7 +307,7 @@ cat ~/.claude/settings.local.json
 #### 6.1.1. 准备项目
 
 ```bash
-cd /home/alan/furbo/feishu_notify
+cd ~/claude-feishu-bridge
 pip install -r requirements.txt
 ```
 
@@ -362,7 +361,7 @@ http://xxxxx.natappfree.cc/webhook/feishu
 
 ```bash
 # 终端 1
-cd /home/alan/furbo/feishu_notify
+cd ~/claude-feishu-bridge
 python3 src/server/webhook_server.py
 
 # 终端 2
@@ -376,9 +375,7 @@ python3 src/server/webhook_server.py
 ## 七、项目结构
 
 ```
-/home/alan/furbo/feishu_notify/
-├── .claude/
-│   └── settings.json              # Hook 注册配置
+claude-feishu-bridge/
 ├── config/
 │   └── config.yaml               # 应用配置
 ├── data/
@@ -491,7 +488,7 @@ After=network.target
 [Service]
 Type=simple
 User=alan
-WorkingDirectory=/home/alan/furbo/feishu_notify
+WorkingDirectory=~/claude-feishu-bridge
 ExecStart=/usr/bin/python3 src/server/webhook_server.py
 Restart=always
 RestartSec=10
