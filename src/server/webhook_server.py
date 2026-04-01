@@ -200,7 +200,7 @@ async def handle_feishu_webhook(request: Request):
             return JSONResponse(content={"challenge": challenge})
 
         # 处理不同类型的事件
-        handler = WebhookHandler(storage)
+        handler = WebhookHandler(storage, bridge_mode)
         result = await handler.handle_event(event_data)
 
         return JSONResponse(content={"code": 0, "msg": "success"})
@@ -239,7 +239,7 @@ class WebhookHandler:
         event = event_data.get("event", {})
         message = event.get("message", {})
         content_json = json.loads(message.get("content", "{}"))
-        text = content_json.get("text", "").strip().lower()
+        text = content_json.get("text", "").strip()
 
         # 查找最近的待处理请求
         pending_request = self.storage.get_latest_pending()
@@ -248,11 +248,65 @@ class WebhookHandler:
             logger.warning("No pending request found")
             return {"error": "No pending request"}
 
-        # 解析用户意图
-        decision = self._parse_text_decision(text)
+        request_id = pending_request["request_id"]
+        hook_event_name = pending_request.get("hook_event_name", "")
+
+        # 处理 AskUserQuestion 的文本回复
+        if hook_event_name == "AskUserQuestion":
+            # 找到第一个未回答的问题
+            questions = pending_request.get("questions", [])
+            for q in questions:
+                if not q.get("answer"):
+                    question_type = q.get("question_type", "text")
+                    question_id = q["question_id"]
+
+                    if question_type == "text":
+                        # 文本问题，直接保存答案
+                        self.storage.update_question_answers(request_id, {question_id: text})
+                        logger.info(f"Question {question_id} answered via text: {text} for request {request_id}")
+
+                        # 检查是否所有问题都已回答
+                        request_data = self.storage.get_request(request_id)
+                        if request_data:
+                            all_answered = all(q.get("answer") is not None for q in request_data.get("questions", []))
+                            if all_answered:
+                                self.storage.update_status(request_id, "answered", "所有问题已回答")
+                        return {"success": True}
+
+                    elif question_type == "select":
+                        # 单选问题，检查回复是否匹配某个选项
+                        options = q.get("options", [])
+                        # 将回复与选项进行模糊匹配
+                        matched_option = None
+                        for opt in options:
+                            if text.lower() in opt.lower() or opt.lower() in text.lower():
+                                matched_option = opt
+                                break
+
+                        if matched_option:
+                            self.storage.update_question_answers(request_id, {question_id: matched_option})
+                            logger.info(f"Question {question_id} answered via text: {matched_option} for request {request_id}")
+
+                            # 检查是否所有问题都已回答
+                            request_data = self.storage.get_request(request_id)
+                            if request_data:
+                                all_answered = all(q.get("answer") is not None for q in request_data.get("questions", []))
+                                if all_answered:
+                                    self.storage.update_status(request_id, "answered", "所有问题已回答")
+                            return {"success": True}
+                        else:
+                            # 选项不匹配，记录警告但继续尝试其他问题
+                            logger.warning(f"Reply '{text}' does not match any options for {question_id}")
+                            continue
+
+            logger.warning(f"No matching question found for reply '{text}' in request {request_id}")
+            return {"error": "No matching question"}
+
+        # 处理 PermissionRequest 的权限决策
+        text_lower = text.lower()
+        decision = self._parse_text_decision(text_lower)
 
         # 更新请求状态
-        request_id = pending_request["request_id"]
         self.storage.update_status(
             request_id,
             status=decision["behavior"],
@@ -270,6 +324,9 @@ class WebhookHandler:
         event = event_data.get("event", {})
         action = event.get("action", {})
 
+        # 调试日志
+        logger.info(f"Card action event: {json.dumps(event_data, ensure_ascii=False)[:500]}")
+
         # 提取 request_id 和决策
         # 注意：action.value 可能是对象或字符串，需要处理
         value = action.get("value", {})
@@ -281,23 +338,127 @@ class WebhookHandler:
             action_value = value
 
         request_id = action_value.get("request_id")
-        behavior = action_value.get("behavior")  # "allow" or "deny"
+        action_type = action_value.get("action")  # "submit", "cancel", "allow", "deny"
 
-        logger.info(f"Card action: request_id={request_id}, behavior={behavior}")
+        logger.info(f"Card action: request_id={request_id}, action={action_type}")
 
-        if not request_id or not behavior:
+        if not request_id:
             logger.warning(f"Invalid action value: {action_value}")
             return {"error": "Invalid action"}
 
-        # 更新请求状态
-        self.storage.update_status(
-            request_id,
-            status=behavior,
-            user_message=f"用户通过卡片按钮响应: {behavior}"
+        # 处理不同类型的动作
+        if action_type == "answer":
+            # AskUserQuestion 单选答案
+            question_id = action_value.get("question_id")
+            answer = action_value.get("answer", "")
+
+            if question_id and answer:
+                self.storage.update_question_answers(request_id, {question_id: answer})
+                logger.info(f"Question {question_id} answered: {answer} for request {request_id}")
+                return {"success": True}
+            else:
+                logger.warning(f"Invalid answer data: {action_value}")
+                return {"error": "Invalid answer data"}
+
+        elif action_type == "submit":
+            # AskUserQuestion 提交答案（保留兼容性）
+            form_data = self._extract_form_data(event_data)
+            self.storage.update_question_answers(request_id, form_data)
+            logger.info(f"Question answers updated for request {request_id}")
+            return {"success": True}
+
+        elif action_type == "skip":
+            # 跳过文本问题
+            request_data = self.storage.get_request(request_id)
+            if request_data:
+                # 找到第一个文本问题，设置为空字符串
+                for q in request_data.get("questions", []):
+                    if q.get("question_type") == "text" and not q.get("answer"):
+                        q["answer"] = ""
+                self.storage.save_request(request_id, request_data)
+                # 检查是否所有问题都已回答
+                all_answered = all(q.get("answer") is not None for q in request_data.get("questions", []))
+                if all_answered:
+                    self.storage.update_status(request_id, "answered", "用户跳过文本问题")
+                logger.info(f"Question skipped for request {request_id}")
+            return {"success": True}
+
+        elif action_type == "cancel":
+            # 取消请求
+            self.storage.update_status(request_id, "cancelled", "用户取消")
+            logger.info(f"Request {request_id} cancelled")
+            return {"success": True}
+
+        elif action_type in ["allow", "deny"]:
+            # PermissionRequest 权限决策
+            self.storage.update_status(
+                request_id,
+                status=action_type,
+                user_message=f"用户通过卡片按钮响应: {action_type}"
+            )
+            logger.info(f"Request {request_id} updated to {action_type}")
+            return {"success": True}
+
+        else:
+            # 兼容旧的 behavior 格式
+            behavior = action_value.get("behavior")
+            if behavior:
+                self.storage.update_status(
+                    request_id,
+                    status=behavior,
+                    user_message=f"用户通过卡片按钮响应: {behavior}"
+                )
+                logger.info(f"Request {request_id} updated to {behavior}")
+                return {"success": True}
+
+        logger.warning(f"Unknown action type: {action_type}")
+        return {"error": "Unknown action type"}
+
+    def _extract_form_data(self, event_data: Dict[str, Any]) -> Dict[str, str]:
+        """
+        从卡片交互事件中提取用户填写的答案
+
+        Args:
+            event_data: 飞书事件数据
+
+        Returns:
+            答案字典 {question_id: answer}
+        """
+        event = event_data.get("event", {})
+        action = event.get("action", {})
+
+        # 调试日志
+        logger.info(f"Action data: {json.dumps(action, ensure_ascii=False)[:500]}")
+
+        # 尝试多种可能的表单数据字段
+        form_values = (
+            action.get("formValues", {}) or
+            action.get("form_values", {}) or
+            action.get("formData", {}) or
+            action.get("form_data", {})
         )
 
-        logger.info(f"Request {request_id} updated to {behavior}")
-        return {"success": True}
+        logger.info(f"Form values: {json.dumps(form_values, ensure_ascii=False)[:500]}")
+
+        answers = {}
+        for key, value in form_values.items():
+            # 提取 question_id 和实际答案
+            # value 格式: {"question_id": "q1", "value": "用户输入的值"}
+            if isinstance(value, dict):
+                question_id = value.get("question_id", key)
+                answer_value = value.get("value", "")
+
+                # 对于多选，答案可能是数组
+                if isinstance(answer_value, list):
+                    answer_value = ",".join(answer_value)
+
+                answers[question_id] = answer_value
+            else:
+                # 简单字符串值
+                answers[key] = str(value)
+
+        logger.info(f"Extracted answers: {answers}")
+        return answers
 
     def _parse_text_decision(self, text: str) -> Dict[str, str]:
         """解析文本消息为决策"""

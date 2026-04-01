@@ -115,6 +115,36 @@ class PermissionStorage:
 
             return pending_requests[0][1]
 
+    def update_question_answers(self, request_id: str, answers: Dict[str, str]) -> bool:
+        """
+        更新问题答案
+
+        Args:
+            request_id: 请求唯一 ID
+            answers: 问题答案字典 {question_id: answer}
+
+        Returns:
+            是否更新成功
+        """
+        with self.lock:
+            try:
+                all_data = self._read_data()
+                if request_id in all_data:
+                    # 更新每个问题的答案
+                    for q in all_data[request_id].get("questions", []):
+                        q_id = q["question_id"]
+                        if q_id in answers:
+                            q["answer"] = answers[q_id]
+
+                    all_data[request_id]["status"] = "answered"
+                    all_data[request_id]["updated_at"] = time.time()
+                    self._write_data(all_data)
+                    return True
+                return False
+            except Exception as e:
+                print(f"Error updating question answers: {e}", file=__import__('sys').stderr)
+                return False
+
     def cleanup_old_requests(self, max_age_hours: int = 24) -> int:
         """
         清理旧请求

@@ -4,7 +4,7 @@
 """
 
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 class CardBuilder:
@@ -193,6 +193,230 @@ class CardBuilder:
                 }
             ]
         }
+
+        return card
+
+    # ==================== AskUserQuestion 卡片方法 ====================
+
+    def build_question_card(
+        self,
+        questions: List[Dict[str, Any]],
+        request_id: str
+    ) -> Dict[str, Any]:
+        """
+        构建问题收集卡片
+
+        Args:
+            questions: 问题列表，每个问题包含:
+                - question_id: 唯一标识
+                - question_text: 问题内容
+                - question_type: "text" | "select" | "multi_select"
+                - options: 选项列表(select/multi_select 时有值)
+            request_id: 请求 ID
+
+        Returns:
+            飞书卡片 JSON
+        """
+        elements = []
+
+        # 添加问题元素
+        for i, q in enumerate(questions):
+            question_id = q["question_id"]
+            question_text = q["question_text"]
+            question_type = q.get("question_type", "text")
+
+            # 问题标题
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**问题 {i+1}**:\n{question_text}"
+                }
+            })
+
+            # 根据类型添加输入元素
+            if question_type == "text":
+                # 文本输入：提示用户在飞书中直接回复
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "*请在飞书中直接回复您的答案*"
+                    }
+                })
+            elif question_type == "select":
+                # 单选：使用多个按钮
+                options = q.get("options", [])
+                buttons = []
+                for opt in options:
+                    buttons.append({
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": opt
+                        },
+                        "type": "default",
+                        "value": {
+                            "request_id": request_id,
+                            "action": "answer",
+                            "question_id": question_id,
+                            "answer": opt
+                        }
+                    })
+
+                # 将按钮添加到元素中（每行最多3个按钮）
+                for i in range(0, len(buttons), 3):
+                    elements.append({
+                        "tag": "action",
+                        "actions": buttons[i:i+3]
+                    })
+            elif question_type == "multi_select":
+                # 多选：提示用户回复逗号分隔的选项
+                options = q.get("options", [])
+                options_text = "、".join(options)
+
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"*可选项*: {options_text}\n\n*请在飞书中直接回复您选择的选项（多个选项用逗号分隔）*"
+                    }
+                })
+
+        # 只添加取消按钮（选择问题不需要提交按钮）
+        elements.append({"tag": "hr"})
+        cancel_actions = [
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "取消"
+                },
+                "type": "default",
+                "value": {
+                    "request_id": request_id,
+                    "action": "cancel"
+                }
+            }
+        ]
+
+        # 对于文本输入问题，添加"跳过"按钮
+        has_text_question = any(q.get("question_type") == "text" for q in questions)
+        if has_text_question:
+            cancel_actions.insert(0, {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "跳过此问题"
+                },
+                "type": "default",
+                "value": {
+                    "request_id": request_id,
+                    "action": "skip"
+                }
+            })
+
+        elements.append({
+            "tag": "action",
+            "actions": cancel_actions
+        })
+
+        # 添加 ID 显示
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": f"ID: {request_id[:8]}...",
+                "extra": {
+                    "style": {
+                        "font_size": "small",
+                        "color": "grey"
+                    }
+                }
+            }
+        })
+
+        card = {
+            "config": {
+                "wide_screen_mode": True
+            },
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": " Claude Code 需要您的反馈"
+                },
+                "template": "blue"
+            },
+            "elements": elements
+        }
+
+        return card
+
+    def build_question_result_card(
+        self,
+        answers: Dict[str, str],
+        status: str
+    ) -> Dict[str, Any]:
+        """
+        构建问题回答结果卡片
+
+        Args:
+            answers: 问题答案字典 {question_id: answer}
+            status: 状态 (success/timeout/cancel)
+
+        Returns:
+            卡片 JSON
+        """
+        if status == "success":
+            title = "已收到您的回答"
+            template = "green"
+            icon = ""
+        elif status == "timeout":
+            title = "等待超时"
+            template = "yellow"
+            icon = ""
+        else:  # cancel
+            title = "已取消"
+            template = "grey"
+            icon = ""
+
+        # 构建答案显示
+        answer_elements = []
+        for q_id, answer in answers.items():
+            answer_elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{q_id}**: {answer}"
+                }
+            })
+
+        card = {
+            "config": {
+                "wide_screen_mode": True
+            },
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"{icon} {title}"
+                },
+                "template": template
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "您的回答已传递给 Claude Code"
+                    }
+                }
+            ]
+        }
+
+        # 如果有答案，显示答案
+        if answer_elements:
+            card["elements"].append({"tag": "hr"})
+            card["elements"].extend(answer_elements)
 
         return card
 

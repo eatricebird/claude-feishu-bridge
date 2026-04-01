@@ -3,17 +3,6 @@
 Claude Code PermissionRequest Hook
 拦截权限请求并通过飞书发送通知，等待用户响应
 
-输入格式（通过 stdin）：
-{
-    "session_id": "abc123",
-    "tool_name": "Bash",
-    "tool_input": {
-        "command": "rm -rf node_modules",
-        "description": "Remove node_modules directory"
-    },
-    "permission_suggestions": [...]
-}
-
 输出格式（通过 stdout）：
 {
     "hookSpecificOutput": {
@@ -33,6 +22,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any
+
+# 日志文件路径
+LOG_FILE = Path(__file__).parent.parent.parent / "data" / "hook_debug.log"
 
 # 添加项目路径
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -90,20 +82,35 @@ class PermissionHook:
         self.timeout = perm_config.get("timeout", 300)
         self.poll_interval = perm_config.get("poll_interval", 2)
 
+        # AskUserQuestion 远程模式配置
+        question_config = config.get("ask_user_question", {})
+        self.question_timeout = min(
+            question_config.get("timeout", 300),
+            self.timeout - 10  # 留余量，不超过 hook 总超时
+        )
+
     def handle_permission_request(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         处理权限请求
         """
-        # 生成唯一请求 ID
+        tool_name = input_data.get("tool_name", "Unknown")
+
+        if tool_name == "AskUserQuestion":
+            # 发送飞书交互卡片，阻塞等回答，返回 allow
+            return self._handle_ask_user_question(input_data)
+
+        # 其他工具：发送权限卡片，等待 allow/deny
+        return self._handle_tool_permission(input_data)
+
+    def _handle_tool_permission(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """处理普通工具的权限请求"""
         request_id = str(uuid.uuid4())
-        session_id = input_data.get("session_id", "")
         tool_name = input_data.get("tool_name", "Unknown")
         tool_input = input_data.get("tool_input", {})
 
-        # 构建权限请求数据
         permission_data = {
             "request_id": request_id,
-            "session_id": session_id,
+            "session_id": input_data.get("session_id", ""),
             "tool_name": tool_name,
             "tool_input": tool_input,
             "status": "pending",
@@ -111,10 +118,8 @@ class PermissionHook:
             "updated_at": time.time()
         }
 
-        # 保存到存储
         self.storage.save_request(request_id, permission_data)
 
-        # 构建并发送飞书消息卡片
         card = self.card_builder.build_permission_card(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -127,19 +132,15 @@ class PermissionHook:
                 card=card
             )
 
-            # 更新存储中的消息 ID
             permission_data["feishu_message_id"] = message_id
             self.storage.save_request(request_id, permission_data)
 
-            # 等待用户响应
             decision = self._wait_for_decision(request_id)
 
-            # 更新飞书消息卡片显示决策结果
             try:
                 result_card = self.card_builder.build_result_card(decision, tool_name)
                 self.feishu.update_card(message_id, result_card)
             except Exception as e:
-                # 更新卡片失败不影响主流程
                 print(f"Warning: Failed to update card: {e}", file=sys.stderr)
 
             return {
@@ -150,7 +151,6 @@ class PermissionHook:
             }
 
         except Exception as e:
-            # 发送失败时回退到拒绝
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
@@ -161,23 +161,146 @@ class PermissionHook:
                 }
             }
 
+    def _handle_ask_user_question(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理 AskUserQuestion：
+        发送飞书交互卡片，阻塞等待回答，写入 data/last_answer.json。
+        终端选择框和飞书卡片同时显示，用户可从任一端回答。
+        飞书回答写入文件，Claude 通过 CLAUDE.md 指令读取。
+        """
+        tool_input = input_data.get("tool_input", {})
+        questions = self._parse_questions(tool_input)
+
+        if not questions:
+            return self._make_decision("allow", "")
+
+        log_debug(f"AskUserQuestion remote: {len(questions)} questions, sending to Feishu")
+
+        # 保存请求
+        request_id = str(uuid.uuid4())
+        question_data = {
+            "request_id": request_id,
+            "session_id": input_data.get("session_id", ""),
+            "hook_event_name": "AskUserQuestion",
+            "questions": questions,
+            "status": "pending",
+            "created_at": time.time(),
+            "updated_at": time.time()
+        }
+        self.storage.save_request(request_id, question_data)
+
+        # 发送飞书交互卡片
+        try:
+            card = self.card_builder.build_question_card(
+                questions=questions,
+                request_id=request_id
+            )
+            message_id = self.feishu.send_card(receive_id=self.user_id, card=card)
+            question_data["feishu_message_id"] = message_id
+            self.storage.save_request(request_id, question_data)
+        except Exception as e:
+            log_debug(f"AskUserQuestion remote: send card failed: {e}")
+            return self._make_decision("allow", "")
+
+        # 阻塞等待飞书回答
+        result = self._wait_for_answer(request_id)
+        answers = result.get("answers", {})
+        status = result.get("status", "timeout")
+
+        # 更新飞书卡片
+        try:
+            result_card = self.card_builder.build_question_result_card(
+                answers=answers, status=status
+            )
+            self.feishu.update_card(message_id, result_card)
+        except Exception:
+            pass
+
+        # 将答案写入文件（Claude 通过 CLAUDE.md 指令读取）
+        self._write_answer_file(questions, answers, status)
+
+        log_debug(f"AskUserQuestion remote: answered={answers}, status={status}")
+
+        return self._make_decision("allow", "")
+
+    def _parse_questions(self, tool_input: Dict[str, Any]) -> list:
+        """解析 AskUserQuestion 工具输入"""
+        questions = []
+        raw_questions = tool_input.get("questions", [])
+
+        for i, q in enumerate(raw_questions):
+            question_type = q.get("type", q.get("question_type", ""))
+            if not question_type:
+                options = q.get("options", [])
+                question_type = "select" if options else "text"
+
+            if question_type in ["single", "select"]:
+                question_type = "select"
+            elif question_type in ["multiple", "multi", "multi_select", "checkbox"]:
+                question_type = "multi_select"
+
+            raw_options = q.get("options", [])
+            if raw_options and isinstance(raw_options[0], dict):
+                options = [opt.get("label", opt.get("text", opt.get("id", ""))) for opt in raw_options]
+            else:
+                options = raw_options
+
+            questions.append({
+                "question_id": q.get("id", f"q{i+1}"),
+                "question_text": q.get("question", q.get("text", "")),
+                "question_type": question_type,
+                "options": options,
+                "answer": None
+            })
+
+        return questions
+
+    def _wait_for_answer(self, request_id: str) -> Dict[str, Any]:
+        """轮询等待飞书回答"""
+        start_time = time.time()
+
+        while (time.time() - start_time) < self.question_timeout:
+            request_data = self.storage.get_request(request_id)
+
+            if request_data and request_data.get("status") == "answered":
+                answers = {}
+                for q in request_data.get("questions", []):
+                    answers[q["question_id"]] = q.get("answer", "")
+                return {"answers": answers, "status": "success"}
+
+            if request_data and request_data.get("status") == "cancelled":
+                return {"answers": {}, "status": "cancel"}
+
+            time.sleep(self.poll_interval)
+
+        return {"answers": {}, "status": "timeout"}
+
+    def _write_answer_file(self, questions: list, answers: dict, status: str):
+        """将答案写入 data/last_answer.json"""
+        try:
+            answer_file = PROJECT_ROOT / "data" / "last_answer.json"
+            answer_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(answer_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "answers": answers,
+                    "status": status,
+                    "timestamp": time.time(),
+                    "questions": [
+                        {"id": q["question_id"], "text": q["question_text"]}
+                        for q in questions
+                    ]
+                }, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[飞书Hook] 写入答案文件失败: {e}", file=sys.stderr)
+
     def _wait_for_decision(self, request_id: str) -> Dict[str, Any]:
-        """
-        等待用户决策（轮询模式）
-
-        Args:
-            request_id: 请求 ID
-
-        Returns:
-            决策结果 {"behavior": "allow|deny", "message": "..."}
-        """
+        """等待用户决策（轮询模式）"""
         start_time = time.time()
 
         while (time.time() - start_time) < self.timeout:
             request_data = self.storage.get_request(request_id)
 
             if request_data and request_data.get("status") in ["allow", "deny"]:
-                # 用户已响应
                 behavior = request_data["status"]
                 return {
                     "behavior": behavior,
@@ -186,52 +309,62 @@ class PermissionHook:
 
             time.sleep(self.poll_interval)
 
-        # 超时
         return {
             "behavior": "deny",
             "message": f"等待用户响应超时（{self.timeout}秒）"
         }
 
+    def _make_decision(self, behavior: str, message: str) -> Dict[str, Any]:
+        """构造 PermissionRequest 决策输出"""
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": behavior,
+                    "message": message
+                }
+            }
+        }
+
+
+def log_debug(msg: str):
+    """写入调试日志"""
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{time.time()}] {msg}\n")
+    except:
+        pass
+
 
 def main():
     """Hook 入口点"""
     try:
-        # 加载配置
-        config = load_config()
-
-        # 从 stdin 读取输入
         input_data = json.load(sys.stdin)
 
-        # 处理权限请求
+        tool_name = input_data.get("tool_name", "Unknown")
+        log_debug(f"PermissionRequest called with tool_name={tool_name}")
+
+        config = load_config()
         hook = PermissionHook(config)
         result = hook.handle_permission_request(input_data)
 
-        # 输出结果
         print(json.dumps(result))
         sys.exit(0)
 
     except ValueError as e:
-        # 配置错误
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "message": str(e)
-                }
+                "decision": {"behavior": "deny", "message": str(e)}
             }
         }))
         sys.exit(0)
 
     except Exception as e:
-        # 其他错误
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "message": f"Hook 执行失败: {str(e)}"
-                }
+                "decision": {"behavior": "deny", "message": f"Hook 执行失败: {str(e)}"}
             }
         }))
         sys.exit(0)

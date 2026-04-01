@@ -1,6 +1,6 @@
 # 飞书权限通知系统
 
-通过飞书 App 远程处理 Claude Code 的权限请求。当 Claude Code 需要执行敏感操作时，会在飞书中收到卡片通知，点击按钮即可批准或拒绝操作。
+通过飞书 App 远程处理 Claude Code 的权限请求和用户问题。当 Claude Code 需要执行敏感操作或向用户提问时，会在飞书中收到卡片通知，点击按钮即可响应。
 
 > **⚠️ 安全提示**：本项目的 `config/config.yaml` 包含敏感凭据，已被 `.gitignore` 排除。部署时请务必从 `config.yaml.example` 复制并填入自己的凭据，切勿将真实凭据提交到版本控制系统。
 
@@ -44,10 +44,11 @@
 
 | 组件 | 功能 | 技术栈 |
 |------|------|--------|
-| Hook 脚本 | 拦截权限请求，发送飞书通知 | Python 3 |
+| PermissionRequest Hook | 拦截权限请求和用户问题，发送飞书卡片 | Python 3 |
+| PreToolUse Hook | 激活终端 UI 显示（返回 `{}`） | Python 3 |
 | Webhook 服务器 | 接收飞书回调，更新请求状态 | FastAPI + Uvicorn |
 | 飞书客户端 | 发送消息卡片 | Python + curl |
-| 存储层 | 持久化权限请求状态 | JSON 文件 |
+| 存储层 | 持久化请求状态 | JSON 文件 |
 | 内网穿透 | 暴露本地服务到公网 | Natapp |
 
 本项目仅仅包含`Hook脚本`,`Webhook 服务器`,`存储层`. 飞书客户端，内网穿透需要客户自行搭建和配置（可以参考本文操作）
@@ -239,22 +240,21 @@ Tunnel established at http://xxxxx.natappfree.cc
 
 ## 五、部署 Claude Code Hook
 
-### 5.1. Hook 注册位置
+### 5.1 Hook 部署
 
-Claude Code 按以下顺序读取配置：
+在项目目录创建 `.claude/settings.local.json`：
 
-1. `~/.claude/settings.json` (全局配置)
-2. `~/.claude/settings.local.json` (用户配置)
-3. `<project>/.claude/settings.json` (项目配置)
-
-### 5.2. 部署方法
-
-**方法 1：用户级部署（推荐）**
-
-编辑 `~/.claude/settings.local.json`：
-
-```json
+```bash
+mkdir -p ~/claude-feishu-bridge/.claude
+cat > ~/claude-feishu-bridge/.claude/settings.local.json <<EOF
 {
+  "permissions": {
+    "allow": [
+      "AskUserQuestion",
+      "Bash(python3 ~/claude-feishu-bridge/src/hooks/permission_request.py)",
+      "Bash(python3 ~/claude-feishu-bridge/src/hooks/ask_user_question.py)"
+    ]
+  },
   "hooks": {
     "PermissionRequest": [
       {
@@ -266,27 +266,15 @@ Claude Code 按以下顺序读取配置：
           }
         ]
       }
-    ]
-  }
-}
-```
-
-**方法 2：项目级部署**
-
-在项目目录创建 `.claude/settings.json`：
-
-```bash
-mkdir -p /path/to/project/.claude
-cat > /path/to/project/.claude/settings.json <<EOF
-{
-  "hooks": {
-    "PermissionRequest": [
+    ],
+    "PreToolUse": [
       {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/claude-feishu-bridge/src/hooks/permission_request.py",
-            "timeout": 360
+            "command": "python3 ~/claude-feishu-bridge/src/hooks/ask_user_question.py",
+            "timeout": 660
           }
         ]
       }
@@ -296,11 +284,20 @@ cat > /path/to/project/.claude/settings.json <<EOF
 EOF
 ```
 
-### 5.3. 验证部署
+### 5.2 Hook 说明
+
+| Hook 类型 | 功能 | 触发时机 |
+|----------|------|---------|
+| PermissionRequest | 拦截权限请求，发送飞书卡片（权限审批或远程提问） | 工具需要权限时，或 Claude 向用户提问时 |
+| PreToolUse (AskUserQuestion) | 激活终端选择框显示 | Claude 向用户提问时 |
+
+**说明**：PermissionRequest Hook 统一处理权限审批和远程提问，PreToolUse Hook 的存在让终端 UI 能够正常显示。
+
+### 5.3 验证部署
 
 ```bash
 # 检查配置是否生效
-cat ~/.claude/settings.local.json
+cat ~/claude-feishu-bridge/.claude/settings.local.json
 
 # 测试 Hook
 ./scripts/test_hook.sh
@@ -339,11 +336,11 @@ vi config/config.yaml
 
 #### 6.1.4. 配置 Claude Code Hook
 
-```bash
-vi ~/.claude/settings.local.json
-```
+Hook 已包含在项目配置中，确保 `~/claude-feishu-bridge/.claude/settings.local.json` 文件存在：
 
-添加 Hook 配置。
+```bash
+cat ~/claude-feishu-bridge/.claude/settings.local.json
+```
 
 #### 6.1.5. 启动服务
 
@@ -384,13 +381,17 @@ python3 src/server/webhook_server.py
 
 ```
 claude-feishu-bridge/
+├── .claude/
+│   └── settings.local.json       # Claude Code Hook 配置
 ├── config/
 │   └── config.yaml               # 应用配置
 ├── data/
-│   └── permissions.json          # 权限请求存储
+│   ├── permissions.json          # 权限请求存储
+│   └── hook_debug.log            # Hook 调试日志
 ├── src/
 │   ├── hooks/
-│   │   └── permission_request.py # Claude Code Hook
+│   │   ├── permission_request.py # PermissionRequest Hook
+│   │   └── ask_user_question.py  # PreToolUse Hook (AskUserQuestion)
 │   ├── server/
 │   │   └── webhook_server.py     # FastAPI Webhook 服务器
 │   ├── feishu/
@@ -447,19 +448,18 @@ cat ~/.claude/settings.local.json
 确保 Hook 配置正确且路径有效。
 
 ### 问题 2：飞书没有收到通知
-
 **检查**：
-1. Webhook 服务器是否运行：`ps aux | grep webhook_server`
-2. Natapp 是否运行：`ps aux | grep natapp`
-3. 内网穿透 URL 是否正确配置到飞书
+脚本`permission_request.py`中是否正确读取了配置文件，并且飞书 API 调用没有报错。可以在脚本中添加日志输出，查看是否成功发送了请求。
 
 ### 问题 3：点击按钮后无响应
 
 **检查**：
-```bash
-# 查看 Webhook 日志
-# 应该能看到 "Card action" 或 "Received webhook" 日志
-```
+1. Webhook 服务器是否运行：`ps aux | grep webhook_server`
+1. Webhook 服务器是否正常工作:
+   - 浏览器输入`http://g52ba9a6.natappfree.cc/health`（替换为你的 Natapp URL）应该返回 `{"status":"ok"}`
+2. Natapp 是否运行：`ps aux | grep natapp`
+3. 内网穿透 URL 是否正确配置到飞书
+4. 内网穿透 URL 是否更换了域名，如果是，更新飞书回调 URL 和事件 URL。
 
 ### 问题 4：超时错误
 
