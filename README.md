@@ -298,10 +298,27 @@ EOF
 ```bash
 # 检查配置是否生效
 cat ~/claude-feishu-bridge/.claude/settings.local.json
-
-# 测试 Hook
-./scripts/test_hook.sh
 ```
+
+### 5.4 端到端测试（开发时使用）
+
+在 Claude Code 中运行：
+
+```
+/e2e-test
+```
+
+该 Skill 会引导你完成以下测试场景：
+1. **权限审批 - 批准**：验证飞书批准后 Claude 正确执行
+2. **权限审批 - 拒绝**：验证飞书拒绝后 Claude 正确阻止
+3. **远程提问 - 单选**：验证通过飞书回答单选问题
+4. **远程提问 - 文本**：验证通过飞书回答文本问题
+5. **超时处理**：验证超时场景的正确处理
+
+每个场景会：
+- 在飞书中发送卡片
+- 等待你在飞书中响应
+- 验证结果并显示
 
 ---
 
@@ -399,8 +416,7 @@ claude-feishu-bridge/
 │   │   └── cards.py              # 消息卡片构建器
 │   └── storage.py                # 状态存储管理
 ├── scripts/
-│   ├── start.sh                  # 一键启动脚本
-│   └── test_hook.sh             # Hook 测试脚本
+│   └── start.sh                  # 一键启动脚本
 ├── requirements.txt
 └── README.md
 ```

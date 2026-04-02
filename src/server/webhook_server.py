@@ -200,7 +200,7 @@ async def handle_feishu_webhook(request: Request):
             return JSONResponse(content={"challenge": challenge})
 
         # 处理不同类型的事件
-        handler = WebhookHandler(storage, bridge_mode)
+        handler = WebhookHandler(storage)
         result = await handler.handle_event(event_data)
 
         return JSONResponse(content={"code": 0, "msg": "success"})

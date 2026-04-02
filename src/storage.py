@@ -136,7 +136,10 @@ class PermissionStorage:
                         if q_id in answers:
                             q["answer"] = answers[q_id]
 
-                    all_data[request_id]["status"] = "answered"
+                    # 只有当所有问题都已回答时才设置状态为 answered
+                    all_answered = all(q.get("answer") is not None for q in all_data[request_id].get("questions", []))
+                    if all_answered:
+                        all_data[request_id]["status"] = "answered"
                     all_data[request_id]["updated_at"] = time.time()
                     self._write_data(all_data)
                     return True
